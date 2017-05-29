@@ -8,23 +8,6 @@
  **/
 class Network_controller extends Module_controller
 {
-    public function cidr2ipList($cidr)
-    {
-        $ip_arr = explode('/', $cidr);
-        $start = ip2long($ip_arr[0]);
-        $nm = $ip_arr[1];
-        $num = pow(2, 32 - $nm);
-        $end = $start + $num - 1;
-
-        $ipList = array();
-        for ($i = 0; $i < $num; $i++) {
-            $ipList[$i] = long2ip($start + $i);
-        }
-        return $ipList;
-    }
-
-
-    
     /*** Protect methods with auth! ****/
     public function __construct()
     {
@@ -42,6 +25,21 @@ class Network_controller extends Module_controller
         echo "You've loaded the network module!";
     }
 
+    private function ipInSubnet($cidr, $ip)
+    {
+        $ip_arr = explode('/', $cidr);
+        $start = ip2long($ip_arr[0]);
+        $nm = $ip_arr[1];
+        $num = pow(2, 32 - $nm);
+        $end = $start + $num - 1;
+
+        if (($start <= ip2long($ip)) && (ip2long($ip) <= $end)) {
+            return TRUE;
+        } else {
+            return FALSE;
+        }
+    }
+
     /**
      * REST interface, returns json with ip address ranges
      * defined in conf('ipv4router')
@@ -50,7 +48,8 @@ class Network_controller extends Module_controller
      * @return void
      * @author AvB
      **/
-    public function routers()
+    
+    public function routers() //not routers anymore - more like "clients"
     {
         
         if (! $this->authorized()) {
@@ -71,54 +70,55 @@ class Network_controller extends Module_controller
         $out = array();
         $reportdata = new Reportdata_model();
 
-        // Compile SQL
-        $cnt = 0;
-        $sel_arr = array('COUNT(1) as count');
-        foreach ($router_arr as $key => $value) {
-            if (is_scalar($value)) {
-                $value = array($value);
-            }
-            $when_str = '';
-            foreach ($value as $k => $v) {
-                    if (strpos($v, '/') != FALSE) {
-                        // we do the CIDR stuff
-                        $inlist = "(";
-                        foreach ($this->cidr2ipList($v) as $ipaddress) {
-                            $inlist = $inlist . "'$ipaddress',"; 
-                        }
-                        $inlist = substr_replace($inlist, "", -1) . ")";
-			#print($inlist);
-                        $when_str .= sprintf(" WHEN ipv4router in %s THEN 1", $inlist);
-                    } else {
-                        $when_str .= sprintf(" WHEN ipv4router LIKE '%s%%' THEN 1", $v);
-                    }
-            }
-            $sel_arr[] = "SUM(CASE $when_str ELSE 0 END) AS r${cnt}";
-            $cnt++;
-        }
-        
-        $sql = "SELECT " . implode(', ', $sel_arr) . " FROM network
-			LEFT JOIN reportdata USING (serial_number)
-			WHERE ipv4router != '(null)' AND ipv4router != ''".get_machine_group_filter('AND');
+        // Compile SQL        
+        //$sql = "select ipv4router, count(distinct serial_number) as count from network WHERE ipv4router != '(null)' group by ipv4router;";
+
+        $sql = "select remote_ip from reportdata;";
 
         // Create Out array
-        if ($obj = current($reportdata->query($sql))) {
-            $cnt = $total = 0;
-            foreach ($router_arr as $key => $value) {
-                $col = 'r' . $cnt++;
-
-                $out[] = array('key' => $key, 'cnt' => intval($obj->$col));
-
-                $total += $obj->$col;
-            }
-
-            // Add Remaining IP's as other
-            if ($obj->count - $total) {
-                $out[] = array('key' => 'Other', 'cnt' => $obj->count - $total);
+        if ($obj = $reportdata->query($sql)) {
+            foreach ($router_arr as $key => $value) { // loop through vlan entries
+                //$cnt++;
+                if (is_scalar($value)) {
+                    $value = array($value);
+                }
+                $ipcount = 0;
+                foreach($obj as $IPdata) {                              // loop though all unique ipv4router with count
+                    foreach ($value as $k => $v) {                      // loop through vlans for each vlan entry
+                        if ($this->ipInSubnet($v,$IPdata->remote_ip)){ 
+                            $out[] = array('key' => $key, 'cnt' => 1);
+                            break;
+                        }
+                    }
+                    $ipcount += 1;
+                }  
             }
         }
+        
+        $totals = array();
+        $final = array();
+
+        foreach($out as $item => $item_count) {
+            $pid = $item_count['key'];
+            if(!isset($totals[$pid])) {
+                $totals[$pid] = $item_count;
+            } else {
+                $totals[$pid]['cnt'] += $item_count['cnt'];
+            }
+        }
+        //rename the keys - TODO - figure out a better way rather than this double handling
+        $vlanTotal = 0;
+        foreach($totals as $vlanName => $vlanCount){
+            $final[] = array('key' => $vlanName, 'cnt' => $totals[$vlanName]['cnt']);
+            $vlanTotal += $totals[$vlanName]['cnt'];
+        }
+
+        // update "Other" total
+        $otherTotal = $ipcount - $vlanTotal;
+        $final[] = array('key' => 'Other', 'cnt' => $otherTotal);
 
         $obj = new View();
-        $obj->view('json', array('msg' => $out));
+        $obj->view('json', array('msg' => $final));
+        //$obj->view('json', array('msg' => $out));
     }
 } // END class default_module
